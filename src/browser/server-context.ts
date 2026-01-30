@@ -26,6 +26,7 @@ import type { PwAiModule } from "./pw-ai-module.js";
 import { getPwAiModule } from "./pw-ai-module.js";
 import { resolveTargetIdFromTabs } from "./target-id.js";
 import { movePathToTrash } from "./trash.js";
+import { createRtrvrProvider, isRtrvrProfile, type RtrvrProvider } from "./rtrvr-provider.js";
 
 export type {
   BrowserRouteContext,
@@ -74,12 +75,96 @@ async function fetchOk(url: string, timeoutMs = 1500, init?: RequestInit): Promi
 }
 
 /**
+ * Create a profile context for rtrvr profiles.
+ */
+function createRtrvrProfileContext(
+  opts: ContextOptions,
+  profile: ResolvedBrowserProfile,
+): ProfileContext {
+  let provider: RtrvrProvider | null = null;
+
+  const getProvider = () => {
+    if (!provider) {
+      provider = createRtrvrProvider({
+        profileName: profile.name,
+        profile: {
+          driver: profile.driver as "rtrvr" | "rtrvr-cloud",
+          color: profile.color,
+          rtrvrApiKey: profile.rtrvrApiKey,
+          rtrvrDeviceId: profile.rtrvrDeviceId,
+          rtrvrApiUrl: profile.rtrvrApiUrl,
+        },
+      });
+    }
+    return provider;
+  };
+
+  return {
+    profile,
+    ensureBrowserAvailable: async () => {
+      await getProvider().start();
+    },
+    ensureTabAvailable: async (targetId?: string) => {
+      const tabs = await getProvider().getTabs();
+      if (tabs.length === 0) {
+        // For rtrvr, we don't auto-create tabs, user must specify a URL
+        if (profile.driver === "rtrvr-cloud") {
+          throw new Error(
+            `No tabs available for rtrvr-cloud profile "${profile.name}". Use action=open with a URL first.`,
+          );
+        }
+        const p = getProvider();
+        const deviceStatus = await p.getStatus();
+        if (!deviceStatus.running) {
+          throw new Error(
+            `No rtrvr extension device is online for profile "${profile.name}". Open Chrome with the rtrvr extension installed.`,
+          );
+        }
+        throw new Error(
+          `No tabs available for rtrvr profile "${profile.name}". Use action=open with a URL first, or open a tab in the extension.`,
+        );
+      }
+      if (targetId) {
+        const found = tabs.find((t) => t.targetId === targetId || t.targetId.startsWith(targetId));
+        if (found) return found;
+      }
+      return tabs[0]!;
+    },
+    isHttpReachable: async () => {
+      const status = await getProvider().getStatus();
+      return status.running;
+    },
+    isReachable: async () => {
+      const status = await getProvider().getStatus();
+      return status.running && status.cdpReady !== false;
+    },
+    listTabs: () => getProvider().getTabs(),
+    openTab: (url) => getProvider().openTab(url),
+    focusTab: (targetId) => getProvider().focusTab(targetId),
+    closeTab: (targetId) => getProvider().closeTab(targetId),
+    stopRunningBrowser: async () => {
+      // rtrvr browsers are managed externally
+      return { stopped: false };
+    },
+    resetProfile: async () => {
+      // rtrvr profiles don't have local state to reset
+      return { moved: false, from: profile.cdpUrl };
+    },
+  };
+}
+
+/**
  * Create a profile-scoped context for browser operations.
  */
 function createProfileContext(
   opts: ContextOptions,
   profile: ResolvedBrowserProfile,
 ): ProfileContext {
+  // Handle rtrvr profiles with their own context
+  if (isRtrvrProfile({ driver: profile.driver, color: profile.color })) {
+    return createRtrvrProfileContext(opts, profile);
+  }
+
   const state = () => {
     const current = opts.getState();
     if (!current) throw new Error("Browser server not started");
@@ -556,6 +641,33 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
 
       let tabCount = 0;
       let running = false;
+
+      // Handle rtrvr profiles
+      if (isRtrvrProfile({ driver: profile.driver, color: profile.color })) {
+        try {
+          const ctx = createRtrvrProfileContext(opts, profile);
+          const reachable = await ctx.isHttpReachable();
+          running = reachable;
+          if (running && profile.driver !== "rtrvr-cloud") {
+            const tabs = await ctx.listTabs().catch(() => []);
+            tabCount = tabs.filter((t) => t.type === "page").length;
+          }
+        } catch {
+          // rtrvr not reachable
+        }
+
+        result.push({
+          name,
+          cdpPort: profile.cdpPort,
+          cdpUrl: profile.cdpUrl,
+          color: profile.color,
+          running,
+          tabCount,
+          isDefault: name === current.resolved.defaultProfile,
+          isRemote: true,
+        });
+        continue;
+      }
 
       if (profileState?.running) {
         running = true;

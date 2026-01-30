@@ -39,7 +39,13 @@ export type ResolvedBrowserProfile = {
   cdpHost: string;
   cdpIsLoopback: boolean;
   color: string;
-  driver: "openclaw" | "extension";
+  driver: "openclaw" | "extension" | "rtrvr" | "rtrvr-cloud";
+  /** rtrvr API key (for rtrvr/rtrvr-cloud drivers). */
+  rtrvrApiKey?: string;
+  /** rtrvr device ID (for rtrvr driver). */
+  rtrvrDeviceId?: string;
+  /** rtrvr API base URL. */
+  rtrvrApiUrl?: string;
 };
 
 function isLoopbackHost(host: string) {
@@ -227,6 +233,27 @@ export function resolveProfile(
 ): ResolvedBrowserProfile | null {
   const profile = resolved.profiles[profileName];
   if (!profile) return null;
+
+  // Handle rtrvr drivers (no CDP required)
+  if (profile.driver === "rtrvr" || profile.driver === "rtrvr-cloud") {
+    if (!profile.rtrvrApiKey) {
+      throw new Error(
+        `Profile "${profileName}" with driver "${profile.driver}" requires rtrvrApiKey to be set.`,
+      );
+    }
+    return {
+      name: profileName,
+      cdpPort: 0,
+      cdpUrl: profile.rtrvrApiUrl ?? "https://us-central1-rtrvraibot.cloudfunctions.net",
+      cdpHost: "rtrvr",
+      cdpIsLoopback: false,
+      color: profile.color,
+      driver: profile.driver,
+      rtrvrApiKey: profile.rtrvrApiKey,
+      rtrvrDeviceId: profile.rtrvrDeviceId,
+      rtrvrApiUrl: profile.rtrvrApiUrl,
+    };
+  }
 
   const rawProfileUrl = profile.cdpUrl?.trim() ?? "";
   let cdpHost = resolved.cdpHost;
