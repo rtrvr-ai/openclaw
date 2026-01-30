@@ -14,6 +14,19 @@ import {
 } from "./constants.js";
 import { CDP_PORT_RANGE_START, getUsedPorts } from "./profiles.js";
 
+// =============================================================================
+// rtrvr.ai API Endpoints
+// =============================================================================
+
+/** MCP API endpoint for rtrvr.ai extension-based browser control */
+const RTRVR_MCP_API_URL = "https://mcp.rtrvr.ai";
+/** Cloud API endpoint for rtrvr.ai agent and scrape operations */
+const RTRVR_CLOUD_API_URL = "https://api.rtrvr.ai";
+
+// =============================================================================
+// Types
+// =============================================================================
+
 export type ResolvedBrowserConfig = {
   enabled: boolean;
   evaluateEnabled: boolean;
@@ -40,13 +53,17 @@ export type ResolvedBrowserProfile = {
   cdpIsLoopback: boolean;
   color: string;
   driver: "openclaw" | "extension" | "rtrvr" | "rtrvr-cloud";
-  /** rtrvr API key (for rtrvr/rtrvr-cloud drivers). */
+  /** rtrvr.ai API key (for rtrvr/rtrvr-cloud drivers). */
   rtrvrApiKey?: string;
-  /** rtrvr device ID (for rtrvr driver). */
+  /** rtrvr.ai device ID (for rtrvr driver). */
   rtrvrDeviceId?: string;
-  /** rtrvr API base URL. */
+  /** rtrvr.ai API URL (resolved based on driver type). */
   rtrvrApiUrl?: string;
 };
+
+// =============================================================================
+// Helpers
+// =============================================================================
 
 function isLoopbackHost(host: string) {
   const h = host.trim().toLowerCase();
@@ -143,6 +160,11 @@ function ensureDefaultChromeExtensionProfile(
   };
   return result;
 }
+
+// =============================================================================
+// Main Config Resolution
+// =============================================================================
+
 export function resolveBrowserConfig(
   cfg: BrowserConfig | undefined,
   rootConfig?: OpenClawConfig,
@@ -223,6 +245,10 @@ export function resolveBrowserConfig(
   };
 }
 
+// =============================================================================
+// Profile Resolution
+// =============================================================================
+
 /**
  * Resolve a profile by name from the config.
  * Returns null if the profile doesn't exist.
@@ -234,27 +260,39 @@ export function resolveProfile(
   const profile = resolved.profiles[profileName];
   if (!profile) return null;
 
-  // Handle rtrvr drivers (no CDP required)
+  // -------------------------------------------------------------------------
+  // Handle rtrvr.ai profiles (no CDP required)
+  // -------------------------------------------------------------------------
   if (profile.driver === "rtrvr" || profile.driver === "rtrvr-cloud") {
     if (!profile.rtrvrApiKey) {
       throw new Error(
-        `Profile "${profileName}" with driver "${profile.driver}" requires rtrvrApiKey to be set.`,
+        `Profile "${profileName}" with driver "${profile.driver}" requires rtrvrApiKey to be set. ` +
+          "Get your API key from https://www.rtrvr.ai/cloud?view=api-keys",
       );
     }
+
+    // Determine the correct API URL based on driver type:
+    // - rtrvr (extension mode): uses MCP API at https://mcp.rtrvr.ai
+    // - rtrvr-cloud (cloud mode): uses Agent API at https://api.rtrvr.ai
+    const defaultApiUrl = profile.driver === "rtrvr" ? RTRVR_MCP_API_URL : RTRVR_CLOUD_API_URL;
+
     return {
       name: profileName,
-      cdpPort: 0,
-      cdpUrl: profile.rtrvrApiUrl ?? "https://us-central1-rtrvraibot.cloudfunctions.net",
-      cdpHost: "rtrvr",
-      cdpIsLoopback: false,
+      cdpPort: 0, // No CDP for rtrvr profiles
+      cdpUrl: profile.rtrvrApiUrl ?? defaultApiUrl,
+      cdpHost: "rtrvr.ai",
+      cdpIsLoopback: false, // rtrvr.ai is always remote
       color: profile.color,
       driver: profile.driver,
       rtrvrApiKey: profile.rtrvrApiKey,
       rtrvrDeviceId: profile.rtrvrDeviceId,
-      rtrvrApiUrl: profile.rtrvrApiUrl,
+      rtrvrApiUrl: profile.rtrvrApiUrl ?? defaultApiUrl,
     };
   }
 
+  // -------------------------------------------------------------------------
+  // Handle standard CDP-based profiles (openclaw, extension)
+  // -------------------------------------------------------------------------
   const rawProfileUrl = profile.cdpUrl?.trim() ?? "";
   let cdpHost = resolved.cdpHost;
   let cdpPort = profile.cdpPort ?? 0;

@@ -1,8 +1,22 @@
 /**
- * rtrvr Browser Provider
+ * rtrvr.ai Browser Provider
  *
- * Maps OpenClaw browser operations to rtrvr API calls.
+ * Maps OpenClaw browser operations to rtrvr.ai API calls.
  * Supports both extension-based (rtrvr) and cloud-only (rtrvr-cloud) modes.
+ *
+ * Extension Mode (rtrvr):
+ *   - Controls user's local Chrome via rtrvr.ai extension
+ *   - Uses MCP API at https://mcp.rtrvr.ai
+ *   - get_page_data returns enriched accessibility tree
+ *   - Supports free tools (tabs, page data, actions) and credit tools (AI actions)
+ *
+ * Cloud Mode (rtrvr-cloud):
+ *   - Uses rtrvr.ai's cloud browser infrastructure
+ *   - Uses Agent API at https://api.rtrvr.ai/agent
+ *   - /scrape returns accessibility tree
+ *   - No extension required, all operations use credits
+ *
+ * Note: rtrvr.ai provides accessibility trees, NOT screenshots.
  */
 
 import type { BrowserProfileConfig } from "../config/config.js";
@@ -12,8 +26,9 @@ import {
   type RtrvrClient,
   type RtrvrClientConfig,
   type RtrvrPageAction,
-  type RtrvrPageTree,
   type RtrvrTab,
+  type RtrvrSchema,
+  type SystemToolName,
 } from "./rtrvr-client.js";
 
 export type RtrvrProviderConfig = {
@@ -21,25 +36,53 @@ export type RtrvrProviderConfig = {
   profile: BrowserProfileConfig;
 };
 
-type RtrvrActKind = "click" | "type" | "press" | "hover" | "scroll" | "navigate" | "wait" | "close";
+/** OpenClaw action kinds mapped to rtrvr.ai system tools */
+type OpenClawActKind =
+  | "click"
+  | "type"
+  | "press"
+  | "hover"
+  | "scroll"
+  | "navigate"
+  | "wait"
+  | "close"
+  | "back"
+  | "forward"
+  | "refresh"
+  | "clear"
+  | "focus"
+  | "select"
+  | "drag"
+  | "upload";
 
 /**
- * rtrvr Browser Provider
+ * rtrvr.ai Browser Provider
  *
- * Provides a bridge between OpenClaw's browser tool and the rtrvr API.
+ * Provides a bridge between OpenClaw's browser tool and the rtrvr.ai API.
  */
 export class RtrvrProvider {
   private client: RtrvrClient;
   private profileName: string;
   private profile: BrowserProfileConfig;
   private isCloudMode: boolean;
-  private cachedTabs: Map<string, { tabId: number; url: string }> = new Map();
+
+  /**
+   * Cache of tabs for cloud mode (since cloud browsers are ephemeral)
+   * Maps targetId -> { url, title, tree }
+   */
+  private cloudTabCache: Map<string, { url: string; title?: string; tree?: string }> = new Map();
+
+  /**
+   * Cache of extension tabs for consistent targetId mapping
+   * Maps targetId -> tabId
+   */
+  private extensionTabCache: Map<string, number> = new Map();
 
   constructor(config: RtrvrProviderConfig) {
     const { profileName, profile } = config;
 
     if (!profile.rtrvrApiKey) {
-      throw new Error(`rtrvr API key is required for profile "${profileName}"`);
+      throw new Error(`rtrvr.ai API key is required for profile "${profileName}"`);
     }
 
     this.profileName = profileName;
@@ -48,12 +91,15 @@ export class RtrvrProvider {
 
     const clientConfig: RtrvrClientConfig = {
       apiKey: profile.rtrvrApiKey,
-      apiUrl: profile.rtrvrApiUrl,
       deviceId: profile.rtrvrDeviceId,
     };
 
     this.client = createRtrvrClient(clientConfig);
   }
+
+  // ==========================================================================
+  // Status & Lifecycle
+  // ==========================================================================
 
   /**
    * Get browser status
@@ -61,13 +107,15 @@ export class RtrvrProvider {
   async getStatus(): Promise<BrowserStatus> {
     try {
       if (this.isCloudMode) {
-        // Cloud mode is always "running" (serverless)
+        // Cloud mode: check API connectivity and credits
         const credits = await this.client.getCredits();
+        const creditsInfo = credits.creditsRemaining ?? credits.creditsLeft ?? "unknown";
+
         return {
           enabled: true,
           profile: this.profileName,
-          running: true,
-          cdpReady: false,
+          running: true, // Cloud is always "running"
+          cdpReady: false, // No CDP in cloud mode
           pid: null,
           cdpPort: 0,
           chosenBrowser: "rtrvr-cloud",
@@ -75,22 +123,26 @@ export class RtrvrProvider {
           color: this.profile.color,
           headless: true,
           attachOnly: true,
-          detectedBrowser: `rtrvr-cloud (credits: ${credits.creditsRemaining ?? "unknown"})`,
+          detectedBrowser: `rtrvr.ai Cloud (credits: ${creditsInfo})`,
         };
       }
 
-      // Extension mode - check if device is online
+      // Extension mode: check if device is online
       const { online, devices } = await this.client.listDevices();
       const deviceId = this.profile.rtrvrDeviceId;
+
+      // Find target device or first online device
       const targetDevice = deviceId
         ? devices.find((d) => d.deviceId === deviceId)
-        : devices.find((d) => d.hasFcmToken);
+        : devices.find((d) => d.online);
+
+      const isOnline = targetDevice?.online ?? false;
 
       return {
         enabled: true,
         profile: this.profileName,
-        running: online && Boolean(targetDevice?.hasFcmToken),
-        cdpReady: online && Boolean(targetDevice?.hasFcmToken),
+        running: online && isOnline,
+        cdpReady: online && isOnline,
         pid: null,
         cdpPort: 0,
         chosenBrowser: "rtrvr-extension",
@@ -99,10 +151,10 @@ export class RtrvrProvider {
         headless: false,
         attachOnly: true,
         detectedBrowser: targetDevice
-          ? `rtrvr (${targetDevice.deviceName})`
+          ? `rtrvr.ai Extension (${targetDevice.deviceName ?? targetDevice.deviceId})`
           : online
-            ? "rtrvr (no device selected)"
-            : "rtrvr (offline)",
+            ? "rtrvr.ai Extension (no device selected)"
+            : "rtrvr.ai Extension (offline)",
         detectedExecutablePath: targetDevice?.deviceId ?? null,
       };
     } catch (err) {
@@ -137,12 +189,14 @@ export class RtrvrProvider {
       } catch {
         // Ignore tab count errors
       }
+    } else if (this.isCloudMode) {
+      tabCount = this.cloudTabCache.size;
     }
 
     return {
       name: this.profileName,
       cdpPort: 0,
-      cdpUrl: this.profile.rtrvrApiUrl ?? "https://us-central1-rtrvraibot.cloudfunctions.net",
+      cdpUrl: this.isCloudMode ? "https://api.rtrvr.ai" : "https://mcp.rtrvr.ai",
       color: this.profile.color,
       running: status.running,
       tabCount,
@@ -152,41 +206,67 @@ export class RtrvrProvider {
   }
 
   /**
-   * Start browser (no-op for rtrvr, always running)
+   * Start browser (verifies connectivity)
    */
   async start(): Promise<void> {
-    // rtrvr is always running (cloud or extension-based)
-    // Just verify connectivity
     if (this.isCloudMode) {
+      // Cloud mode: verify API connectivity
       await this.client.getCredits();
-    } else {
-      const { online } = await this.client.listDevices();
-      if (!online) {
+      return;
+    }
+
+    // Extension mode: verify device is online
+    const { online, devices } = await this.client.listDevices();
+
+    if (!online || devices.length === 0) {
+      throw new Error(
+        `No rtrvr.ai extension device is online for profile "${this.profileName}". ` +
+          "Install the rtrvr.ai Chrome extension and sign in: " +
+          "https://chromewebstore.google.com/detail/rtrvrai/jldogdgepmcedfdhgnmclgemehfhpomg",
+      );
+    }
+
+    const deviceId = this.profile.rtrvrDeviceId;
+    if (deviceId) {
+      const targetDevice = devices.find((d) => d.deviceId === deviceId);
+      if (!targetDevice?.online) {
         throw new Error(
-          "No rtrvr extension device is online. Open Chrome with the rtrvr extension installed.",
+          `rtrvr.ai device "${deviceId}" is not online for profile "${this.profileName}". ` +
+            "Open Chrome with the rtrvr.ai extension installed.",
         );
       }
     }
   }
 
   /**
-   * Stop browser (no-op for rtrvr)
+   * Stop browser (no-op for rtrvr.ai)
    */
   async stop(): Promise<void> {
-    // No-op for rtrvr - cloud browsers are ephemeral, extension is user-controlled
+    // rtrvr.ai browsers are managed externally
+    // Cloud browsers are ephemeral, extension is user-controlled
   }
+
+  // ==========================================================================
+  // Tab Management
+  // ==========================================================================
 
   /**
    * Get browser tabs
    */
   async getTabs(): Promise<BrowserTab[]> {
     if (this.isCloudMode) {
-      // Cloud mode doesn't have persistent tabs
-      return [];
+      // Cloud mode: return cached tabs (cloud browsers are ephemeral)
+      return Array.from(this.cloudTabCache.entries()).map(([targetId, data]) => ({
+        targetId,
+        title: data.title ?? data.url,
+        url: data.url,
+        type: "page" as const,
+      }));
     }
 
+    // Extension mode: get tabs from extension
     const { tabs } = await this.client.getBrowserTabs();
-    return tabs.map((tab) => this.convertTab(tab));
+    return tabs.map((tab) => this.convertExtensionTab(tab));
   }
 
   /**
@@ -194,41 +274,42 @@ export class RtrvrProvider {
    */
   async openTab(url: string): Promise<BrowserTab> {
     if (this.isCloudMode) {
-      // For cloud mode, we'll use cloudScrape to fetch the page
-      // and return a synthetic tab
-      const result = await this.client.cloudScrape({ urls: [url] });
-      const tab = result.tabs?.[0];
-      const syntheticTab: BrowserTab = {
-        targetId: `cloud-${Date.now()}`,
-        title: tab?.title ?? url,
-        url: tab?.url ?? url,
+      // Cloud mode: use /scrape to fetch the page and get accessibility tree
+      const result = await this.client.cloudScrape({ url });
+
+      const targetId = `rtrvr-cloud-${Date.now()}`;
+      this.cloudTabCache.set(targetId, {
+        url: result?.url ?? url,
+        title: result?.title,
+        tree: result?.tree ?? result?.text,
+      });
+
+      return {
+        targetId,
+        title: result?.title ?? url,
+        url: result?.url ?? url,
         type: "page",
       };
-      this.cachedTabs.set(syntheticTab.targetId, { tabId: 0, url });
-      return syntheticTab;
     }
 
-    // Extension mode: use navigate action to open tab
+    // Extension mode: open new tab using system tool
     await this.client.takePageAction({
-      actions: [{ tool_name: "navigate", args: { url } }],
+      actions: [{ tool_name: "open_new_tab", args: { url } }],
     });
 
-    // Get updated tabs to find the new one
+    // Wait briefly for tab to open, then get the new tab
+    await new Promise((r) => setTimeout(r, 500));
     const { tabs } = await this.client.getBrowserTabs();
-    const newTab = tabs.find((t) => t.url === url) ?? tabs[tabs.length - 1];
+    const newTab =
+      tabs.find((t) => t.url === url || t.url.startsWith(url)) ?? tabs[tabs.length - 1];
 
     if (newTab) {
-      const targetId = `rtrvr-${newTab.tabId}`;
-      this.cachedTabs.set(targetId, { tabId: newTab.tabId, url: newTab.url });
-      return this.convertTab(newTab);
+      return this.convertExtensionTab(newTab);
     }
 
-    return {
-      targetId: `rtrvr-${Date.now()}`,
-      title: url,
-      url,
-      type: "page",
-    };
+    // Fallback if tab not found
+    const targetId = `rtrvr-ext-${Date.now()}`;
+    return { targetId, title: url, url, type: "page" };
   }
 
   /**
@@ -236,16 +317,16 @@ export class RtrvrProvider {
    */
   async closeTab(targetId: string): Promise<void> {
     if (this.isCloudMode) {
-      this.cachedTabs.delete(targetId);
+      this.cloudTabCache.delete(targetId);
       return;
     }
 
-    const tabId = this.resolveTabId(targetId);
+    const tabId = this.extensionTabCache.get(targetId);
     if (tabId !== undefined) {
       await this.client.takePageAction({
         actions: [{ tab_id: tabId, tool_name: "close_tab", args: {} }],
       });
-      this.cachedTabs.delete(targetId);
+      this.extensionTabCache.delete(targetId);
     }
   }
 
@@ -254,249 +335,139 @@ export class RtrvrProvider {
    */
   async focusTab(targetId: string): Promise<void> {
     if (this.isCloudMode) {
-      // No-op for cloud mode
+      // No-op for cloud mode (no persistent tabs)
       return;
     }
 
-    const tabId = this.resolveTabId(targetId);
+    const tabId = this.extensionTabCache.get(targetId);
     if (tabId !== undefined) {
-      // rtrvr doesn't have a direct focus action, but click on tab will focus it
+      // Switch to the tab
       await this.client.takePageAction({
-        actions: [{ tab_id: tabId, tool_name: "click", args: { element_id: 0 } }],
+        actions: [{ tool_name: "switch_tab", args: { tab_id: tabId } }],
       });
     }
   }
 
   /**
-   * Navigate current tab to URL
+   * Navigate to URL
    */
   async navigate(url: string, targetId?: string): Promise<{ ok: true; url: string }> {
     if (this.isCloudMode) {
-      // For cloud, just update the cached URL
-      if (targetId) {
-        this.cachedTabs.set(targetId, { tabId: 0, url });
+      // Cloud mode: fetch new page and update cache
+      const result = await this.client.cloudScrape({ url });
+
+      if (targetId && this.cloudTabCache.has(targetId)) {
+        this.cloudTabCache.set(targetId, {
+          url: result?.url ?? url,
+          title: result?.title,
+          tree: result?.tree ?? result?.text,
+        });
       }
-      return { ok: true, url };
+
+      return { ok: true, url: result?.url ?? url };
     }
 
-    const tabId = targetId ? this.resolveTabId(targetId) : undefined;
+    // Extension mode: navigate in specified tab or current tab
+    const tabId = targetId ? this.extensionTabCache.get(targetId) : undefined;
     await this.client.takePageAction({
-      actions: [{ tab_id: tabId, tool_name: "navigate", args: { url } }],
+      actions: [{ tab_id: tabId, tool_name: "goto_url", args: { url } }],
     });
 
     return { ok: true, url };
   }
 
+  // ==========================================================================
+  // Snapshot (Accessibility Tree - NOT Screenshot)
+  // ==========================================================================
+
   /**
-   * Take a snapshot of the page
+   * Take a snapshot of the page (accessibility tree).
+   * Note: rtrvr.ai returns accessibility trees, NOT screenshots.
    */
   async snapshot(opts: { format: "aria" | "ai"; targetId?: string }): Promise<SnapshotResult> {
     if (this.isCloudMode) {
-      // Use cloud scrape for cloud mode
-      const cached = opts.targetId ? this.cachedTabs.get(opts.targetId) : undefined;
-      const url = cached?.url;
+      return this.cloudSnapshot(opts);
+    }
+    return this.extensionSnapshot(opts);
+  }
 
-      if (!url) {
-        throw new Error("No URL available for cloud snapshot. Open a tab first.");
-      }
+  private async cloudSnapshot(opts: {
+    format: "aria" | "ai";
+    targetId?: string;
+  }): Promise<SnapshotResult> {
+    // Get cached data or throw
+    const cached = opts.targetId ? this.cloudTabCache.get(opts.targetId) : undefined;
 
-      const result = await this.client.cloudScrape({ urls: [url] });
-      const tab = result.tabs?.[0];
+    if (!cached?.url) {
+      throw new Error(
+        `No URL available for cloud snapshot. Use action=open with a URL first (profile "${this.profileName}").`,
+      );
+    }
 
-      if (opts.format === "aria") {
-        return {
-          ok: true,
-          format: "aria",
-          targetId: opts.targetId ?? `cloud-${Date.now()}`,
-          url: tab?.url ?? url,
-          nodes: this.parseAriaNodes(tab?.tree ?? ""),
-        };
-      }
+    // If we don't have tree data, fetch it via /scrape
+    let tree = cached.tree;
+    if (!tree) {
+      const result = await this.client.cloudScrape({ url: cached.url });
+      tree = result?.tree ?? result?.text ?? "";
+      cached.tree = tree;
+    }
 
+    const targetId = opts.targetId ?? `rtrvr-cloud-${Date.now()}`;
+
+    if (opts.format === "aria") {
       return {
         ok: true,
-        format: "ai",
-        targetId: opts.targetId ?? `cloud-${Date.now()}`,
-        url: tab?.url ?? url,
-        snapshot: tab?.tree ?? tab?.content ?? "",
-        stats: {
-          lines: (tab?.tree ?? "").split("\n").length,
-          chars: (tab?.tree ?? "").length,
-          refs: 0,
-          interactive: 0,
-        },
+        format: "aria",
+        targetId,
+        url: cached.url,
+        nodes: this.parseAriaNodes(tree),
       };
     }
 
-    // Extension mode: get page data
-    const tabId = opts.targetId ? this.resolveTabId(opts.targetId) : undefined;
+    return {
+      ok: true,
+      format: "ai",
+      targetId,
+      url: cached.url,
+      snapshot: tree,
+      stats: {
+        lines: tree.split("\n").length,
+        chars: tree.length,
+        refs: this.countRefs(tree),
+        interactive: this.countInteractive(tree),
+      },
+    };
+  }
 
+  private async extensionSnapshot(opts: {
+    format: "aria" | "ai";
+    targetId?: string;
+  }): Promise<SnapshotResult> {
+    let tabId = opts.targetId ? this.extensionTabCache.get(opts.targetId) : undefined;
+
+    // If no targetId or not found, get active tab
     if (tabId === undefined) {
-      // Get active tab
-      const { tabs, activeTab } = await this.client.getBrowserTabs({ filter: "active" });
+      const { activeTab, tabs } = await this.client.getBrowserTabs({ filter: "active" });
       const tab = activeTab ?? tabs[0];
+
       if (!tab) {
-        throw new Error("No active tab found");
+        throw new Error(`No active tab found for profile "${this.profileName}"`);
       }
-      return this.snapshotTab(tab, opts.format);
+
+      tabId = tab.id;
     }
 
+    // Get page data (enriched accessibility tree)
     const { trees } = await this.client.getPageData({ tabIds: [tabId] });
     const tree = trees[0];
 
     if (!tree) {
-      throw new Error("Failed to get page data");
+      throw new Error("Failed to get page data from rtrvr.ai extension");
     }
 
-    return this.convertTreeToSnapshot(tree, opts.format, opts.targetId ?? `rtrvr-${tabId}`);
-  }
+    const targetId = opts.targetId ?? `rtrvr-ext-${tabId}`;
 
-  /**
-   * Take a screenshot (not directly supported, returns error)
-   */
-  async screenshot(_opts: {
-    targetId?: string;
-    fullPage?: boolean;
-    type?: "png" | "jpeg";
-  }): Promise<{ ok: false; error: string }> {
-    // rtrvr API doesn't support direct screenshots
-    // Users should use the cloud_agent or act_on_tab for visual tasks
-    return {
-      ok: false,
-      error:
-        "Direct screenshots are not supported with rtrvr. Use the snapshot action for accessibility tree, or cloud_agent for visual AI tasks.",
-    };
-  }
-
-  /**
-   * Execute a browser action
-   */
-  async act(request: {
-    kind: RtrvrActKind;
-    ref?: string;
-    text?: string;
-    key?: string;
-    direction?: string;
-    x?: number;
-    y?: number;
-    url?: string;
-    ms?: number;
-    targetId?: string;
-  }): Promise<{ ok: true; download?: { path: string } }> {
-    const tabId = request.targetId ? this.resolveTabId(request.targetId) : undefined;
-
-    if (this.isCloudMode) {
-      // For cloud mode, use cloud_agent for complex actions
-      const userInput = this.buildActionDescription(request);
-      const cached = request.targetId ? this.cachedTabs.get(request.targetId) : undefined;
-
-      await this.client.cloudAgent({
-        userInput,
-        urls: cached?.url ? [cached.url] : undefined,
-      });
-
-      return { ok: true };
-    }
-
-    // Map OpenClaw action to rtrvr action
-    const action = this.mapToRtrvrAction(request, tabId);
-
-    await this.client.takePageAction({ actions: [action] });
-
-    return { ok: true };
-  }
-
-  /**
-   * Get console messages (not supported)
-   */
-  async getConsoleMessages(): Promise<{ messages: unknown[] }> {
-    // rtrvr doesn't expose console messages directly
-    return { messages: [] };
-  }
-
-  /**
-   * AI-powered action using act_on_tab
-   */
-  async aiAct(opts: {
-    userInput: string;
-    tabUrls?: string[];
-    tabId?: number;
-    schema?: {
-      fields: Array<{ name: string; description?: string; type?: string; required?: boolean }>;
-    };
-  }): Promise<unknown> {
-    if (this.isCloudMode) {
-      return await this.client.cloudAgent({
-        userInput: opts.userInput,
-        urls: opts.tabUrls,
-        schema: opts.schema,
-      });
-    }
-
-    return await this.client.actOnTab(opts);
-  }
-
-  /**
-   * Extract data from pages
-   */
-  async extract(opts: {
-    userInput: string;
-    tabUrls?: string[];
-    schema?: {
-      fields: Array<{ name: string; description?: string; type?: string; required?: boolean }>;
-    };
-  }): Promise<unknown> {
-    if (this.isCloudMode) {
-      return await this.client.cloudAgent({
-        userInput: `Extract the following data: ${opts.userInput}`,
-        urls: opts.tabUrls,
-        schema: opts.schema,
-      });
-    }
-
-    return await this.client.extractFromTab(opts);
-  }
-
-  // ============ Private helpers ============
-
-  private convertTab(tab: RtrvrTab): BrowserTab {
-    const targetId = `rtrvr-${tab.tabId}`;
-    this.cachedTabs.set(targetId, { tabId: tab.tabId, url: tab.url });
-    return {
-      targetId,
-      title: tab.title,
-      url: tab.url,
-      type: "page",
-    };
-  }
-
-  private resolveTabId(targetId: string): number | undefined {
-    if (targetId.startsWith("rtrvr-")) {
-      const id = parseInt(targetId.slice(6), 10);
-      if (!isNaN(id)) return id;
-    }
-
-    const cached = this.cachedTabs.get(targetId);
-    return cached?.tabId;
-  }
-
-  private async snapshotTab(tab: RtrvrTab, format: "aria" | "ai"): Promise<SnapshotResult> {
-    const { trees } = await this.client.getPageData({ tabIds: [tab.tabId] });
-    const tree = trees[0];
-
-    if (!tree) {
-      throw new Error("Failed to get page data");
-    }
-
-    return this.convertTreeToSnapshot(tree, format, `rtrvr-${tab.tabId}`);
-  }
-
-  private convertTreeToSnapshot(
-    tree: RtrvrPageTree,
-    format: "aria" | "ai",
-    targetId: string,
-  ): SnapshotResult {
-    if (format === "aria") {
+    if (opts.format === "aria") {
       return {
         ok: true,
         format: "aria",
@@ -515,9 +486,167 @@ export class RtrvrProvider {
       stats: {
         lines: tree.tree.split("\n").length,
         chars: tree.tree.length,
-        refs: 0,
-        interactive: 0,
+        refs: this.countRefs(tree.tree),
+        interactive: this.countInteractive(tree.tree),
       },
+    };
+  }
+
+  // ==========================================================================
+  // Screenshot (NOT SUPPORTED)
+  // ==========================================================================
+
+  /**
+   * Take a screenshot.
+   * Note: rtrvr.ai does not provide screenshot capability.
+   * Use snapshot to get the accessibility tree instead.
+   */
+  async screenshot(_opts: {
+    targetId?: string;
+    fullPage?: boolean;
+    type?: "png" | "jpeg";
+  }): Promise<{ ok: false; error: string }> {
+    return {
+      ok: false,
+      error:
+        "Screenshots are not supported with rtrvr.ai. " +
+        "rtrvr.ai provides enriched accessibility trees via snapshot instead. " +
+        "Use action=snapshot for page structure, or AI actions (planner/act) for visual tasks.",
+    };
+  }
+
+  // ==========================================================================
+  // Browser Actions (System Tools)
+  // ==========================================================================
+
+  /**
+   * Execute a browser action using rtrvr.ai system tools
+   */
+  async act(request: {
+    kind: OpenClawActKind;
+    ref?: string;
+    text?: string;
+    key?: string;
+    direction?: string;
+    x?: number;
+    y?: number;
+    url?: string;
+    ms?: number;
+    targetId?: string;
+    value?: string;
+    filePath?: string;
+  }): Promise<{ ok: true; download?: { path: string } }> {
+    if (this.isCloudMode) {
+      return this.cloudAct(request);
+    }
+    return this.extensionAct(request);
+  }
+
+  private async cloudAct(request: {
+    kind: OpenClawActKind;
+    ref?: string;
+    text?: string;
+    key?: string;
+    direction?: string;
+    url?: string;
+    ms?: number;
+    targetId?: string;
+  }): Promise<{ ok: true }> {
+    // Cloud mode: use AI agent for actions
+    const userInput = this.buildActionDescription(request);
+    const cached = request.targetId ? this.cloudTabCache.get(request.targetId) : undefined;
+
+    await this.client.cloudAgent({
+      userInput,
+      urls: cached?.url ? [cached.url] : undefined,
+    });
+
+    return { ok: true };
+  }
+
+  private async extensionAct(request: {
+    kind: OpenClawActKind;
+    ref?: string;
+    text?: string;
+    key?: string;
+    direction?: string;
+    url?: string;
+    ms?: number;
+    targetId?: string;
+    value?: string;
+    filePath?: string;
+  }): Promise<{ ok: true }> {
+    const tabId = request.targetId ? this.extensionTabCache.get(request.targetId) : undefined;
+    const action = this.mapToRtrvrAction(request, tabId);
+
+    await this.client.takePageAction({ actions: [action] });
+
+    return { ok: true };
+  }
+
+  // ==========================================================================
+  // AI-Powered Actions
+  // ==========================================================================
+
+  /**
+   * AI-powered action
+   */
+  async aiAct(opts: {
+    userInput: string;
+    tabUrls?: string[];
+    tabId?: number;
+    schema?: RtrvrSchema;
+  }): Promise<unknown> {
+    if (this.isCloudMode) {
+      return this.client.cloudAgent({
+        userInput: opts.userInput,
+        urls: opts.tabUrls,
+        schema: opts.schema,
+      });
+    }
+
+    return this.client.act(opts);
+  }
+
+  /**
+   * Extract data from pages
+   */
+  async extract(opts: {
+    userInput: string;
+    tabUrls?: string[];
+    schema?: RtrvrSchema;
+  }): Promise<unknown> {
+    if (this.isCloudMode) {
+      return this.client.cloudAgent({
+        userInput: `Extract the following data: ${opts.userInput}`,
+        urls: opts.tabUrls,
+        schema: opts.schema,
+      });
+    }
+
+    return this.client.extract(opts);
+  }
+
+  /**
+   * Get console messages (not supported)
+   */
+  async getConsoleMessages(): Promise<{ messages: unknown[] }> {
+    return { messages: [] };
+  }
+
+  // ==========================================================================
+  // Helper Methods
+  // ==========================================================================
+
+  private convertExtensionTab(tab: RtrvrTab): BrowserTab {
+    const targetId = `rtrvr-ext-${tab.id}`;
+    this.extensionTabCache.set(targetId, tab.id);
+
+    return {
+      targetId,
+      title: tab.title,
+      url: tab.url,
+      type: "page",
     };
   }
 
@@ -527,8 +656,6 @@ export class RtrvrProvider {
     name: string;
     depth: number;
   }> {
-    // Parse the accessibility tree string into nodes
-    // Format is typically: "role name [id=N]" with indentation for depth
     const lines = treeString.split("\n").filter((l) => l.trim());
     const nodes: Array<{ ref: string; role: string; name: string; depth: number }> = [];
 
@@ -536,6 +663,7 @@ export class RtrvrProvider {
       const indentMatch = line.match(/^(\s*)/);
       const depth = indentMatch ? Math.floor(indentMatch[1].length / 2) : 0;
 
+      // Extract ID from [id=N] pattern
       const idMatch = line.match(/\[id=(\d+)\]/);
       const ref = idMatch ? `e${idMatch[1]}` : `e${nodes.length}`;
 
@@ -544,7 +672,7 @@ export class RtrvrProvider {
         .trim()
         .replace(/\[id=\d+\]/, "")
         .trim();
-      const parts = content.split(" ");
+      const parts = content.split(/\s+/);
       const role = parts[0] ?? "generic";
       const name = parts.slice(1).join(" ");
 
@@ -554,17 +682,44 @@ export class RtrvrProvider {
     return nodes;
   }
 
+  private countRefs(tree: string): number {
+    const matches = tree.match(/\[id=\d+\]/g);
+    return matches?.length ?? 0;
+  }
+
+  private countInteractive(tree: string): number {
+    const interactiveRoles = [
+      "button",
+      "link",
+      "textbox",
+      "checkbox",
+      "radio",
+      "combobox",
+      "menuitem",
+    ];
+    let count = 0;
+    for (const role of interactiveRoles) {
+      const regex = new RegExp(`\\b${role}\\b`, "gi");
+      const matches = tree.match(regex);
+      count += matches?.length ?? 0;
+    }
+    return count;
+  }
+
+  /**
+   * Map OpenClaw action kinds to rtrvr.ai system tools
+   */
   private mapToRtrvrAction(
     request: {
-      kind: RtrvrActKind;
+      kind: OpenClawActKind;
       ref?: string;
       text?: string;
       key?: string;
       direction?: string;
-      x?: number;
-      y?: number;
       url?: string;
       ms?: number;
+      value?: string;
+      filePath?: string;
     },
     tabId?: number,
   ): RtrvrPageAction {
@@ -574,55 +729,55 @@ export class RtrvrProvider {
       case "click":
         return {
           tab_id: tabId,
-          tool_name: "click",
+          tool_name: "click_element",
           args: { element_id: elementId },
         };
 
       case "type":
         return {
           tab_id: tabId,
-          tool_name: "type",
+          tool_name: "type_into_element",
           args: { element_id: elementId, text: request.text ?? "" },
         };
 
       case "press":
         return {
           tab_id: tabId,
-          tool_name: "press",
+          tool_name: "press_key",
           args: { key: request.key ?? "Enter" },
         };
 
       case "hover":
         return {
           tab_id: tabId,
-          tool_name: "hover",
+          tool_name: "hover_element",
           args: { element_id: elementId, duration: request.ms },
         };
 
       case "scroll":
         return {
           tab_id: tabId,
-          tool_name: "scroll",
+          tool_name: "scroll_page",
           args: {
-            direction: (request.direction?.toUpperCase() ?? "DOWN") as
-              | "UP"
-              | "DOWN"
-              | "LEFT"
-              | "RIGHT",
+            direction: (request.direction?.toLowerCase() ?? "down") as
+              | "up"
+              | "down"
+              | "left"
+              | "right",
           },
         };
 
       case "navigate":
         return {
           tab_id: tabId,
-          tool_name: "navigate",
+          tool_name: "goto_url",
           args: { url: request.url ?? "" },
         };
 
       case "wait":
         return {
           tab_id: tabId,
-          tool_name: "wait",
+          tool_name: "wait_action",
           args: { duration: request.ms ?? 1000 },
         };
 
@@ -632,17 +787,72 @@ export class RtrvrProvider {
           tool_name: "close_tab",
           args: {},
         };
+
+      case "back":
+        return {
+          tab_id: tabId,
+          tool_name: "go_back",
+          args: {},
+        };
+
+      case "forward":
+        return {
+          tab_id: tabId,
+          tool_name: "go_forward",
+          args: {},
+        };
+
+      case "refresh":
+        return {
+          tab_id: tabId,
+          tool_name: "refresh_page",
+          args: {},
+        };
+
+      case "clear":
+        return {
+          tab_id: tabId,
+          tool_name: "clear_element",
+          args: { element_id: elementId },
+        };
+
+      case "focus":
+        return {
+          tab_id: tabId,
+          tool_name: "focus_element",
+          args: { element_id: elementId },
+        };
+
+      case "select":
+        return {
+          tab_id: tabId,
+          tool_name: "select_dropdown_value",
+          args: { element_id: elementId, value: request.value ?? request.text ?? "" },
+        };
+
+      case "drag":
+        return {
+          tab_id: tabId,
+          tool_name: "drag_element",
+          args: { element_id: elementId },
+        };
+
+      case "upload":
+        return {
+          tab_id: tabId,
+          tool_name: "upload_file",
+          args: { element_id: elementId, file_path: request.filePath ?? "" },
+        };
     }
   }
 
   private parseRefToElementId(ref: string): number | undefined {
-    // Parse refs like "e12" or "12" to element IDs
     const match = ref.match(/^e?(\d+)$/);
     return match ? parseInt(match[1], 10) : undefined;
   }
 
   private buildActionDescription(request: {
-    kind: RtrvrActKind;
+    kind: OpenClawActKind;
     ref?: string;
     text?: string;
     key?: string;
@@ -667,19 +877,39 @@ export class RtrvrProvider {
         return `Wait for ${request.ms ?? 1000}ms`;
       case "close":
         return "Close the tab";
+      case "back":
+        return "Go back";
+      case "forward":
+        return "Go forward";
+      case "refresh":
+        return "Refresh the page";
+      case "clear":
+        return request.ref ? `Clear element ${request.ref}` : "Clear field";
+      case "focus":
+        return request.ref ? `Focus on element ${request.ref}` : "Focus";
+      case "select":
+        return `Select "${request.text ?? ""}" from dropdown`;
+      case "drag":
+        return request.ref ? `Drag element ${request.ref}` : "Drag";
+      case "upload":
+        return "Upload file";
     }
   }
 }
 
+// ==========================================================================
+// Factory Functions
+// ==========================================================================
+
 /**
- * Create a new rtrvr provider instance
+ * Create a new rtrvr.ai provider instance
  */
 export function createRtrvrProvider(config: RtrvrProviderConfig): RtrvrProvider {
   return new RtrvrProvider(config);
 }
 
 /**
- * Check if a profile is configured to use rtrvr
+ * Check if a profile is configured to use rtrvr.ai
  */
 export function isRtrvrProfile(profile: BrowserProfileConfig): boolean {
   return profile.driver === "rtrvr" || profile.driver === "rtrvr-cloud";
