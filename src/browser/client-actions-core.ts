@@ -23,6 +23,20 @@ export type BrowserFormField = {
 
 export type BrowserActRequest =
   | {
+      kind: "ai";
+      userInput: string;
+      urls?: string[];
+      schema?: Record<string, unknown>;
+      maxSteps?: number;
+      context?: string;
+      tool?: string;
+      maxPages?: number;
+      followLinks?: boolean;
+      linkPattern?: string;
+      outputDestination?: Record<string, unknown>;
+      targetId?: string;
+    }
+  | {
       kind: "click";
       ref: string;
       targetId?: string;
@@ -223,14 +237,17 @@ export async function browserDownload(
 export async function browserAct(
   baseUrl: string | undefined,
   req: BrowserActRequest,
-  opts?: { profile?: string },
+  opts?: { profile?: string; timeoutMs?: number },
 ): Promise<BrowserActResponse> {
   const q = buildProfileQuery(opts?.profile);
   return await fetchBrowserJson<BrowserActResponse>(withBaseUrl(baseUrl, `/act${q}`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
-    timeoutMs: 20000,
+    timeoutMs:
+      typeof opts?.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)
+        ? Math.floor(opts.timeoutMs)
+        : 20000,
   });
 }
 

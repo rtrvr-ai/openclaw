@@ -4,9 +4,15 @@ export type BrowserProfileConfig = {
   /** CDP URL for this profile (use for remote Chrome). */
   cdpUrl?: string;
   /** Profile driver (default: openclaw). */
-  driver?: "openclaw" | "extension";
+  driver?: "openclaw" | "extension" | "rtrvr" | "rtrvr-cloud";
   /** Profile color (hex). Auto-assigned at creation. */
   color: string;
+  /** rtrvr API key (required for rtrvr/rtrvr-cloud drivers). */
+  rtrvrApiKey?: string;
+  /** rtrvr device ID (optional for rtrvr driver, identifies which extension to use). */
+  rtrvrDeviceId?: string;
+  /** rtrvr API base URL override (optional; defaults to https://mcp.rtrvr.ai or https://api.rtrvr.ai). */
+  rtrvrApiUrl?: string;
 };
 export type BrowserSnapshotDefaults = {
   /** Default snapshot mode (applies when mode is not provided). */

@@ -1,4 +1,5 @@
 export const ACT_KINDS = [
+  "ai",
   "click",
   "close",
   "drag",

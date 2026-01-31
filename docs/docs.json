@@ -1064,6 +1064,7 @@
           "tools/browser",
           "tools/browser-login",
           "tools/chrome-extension",
+          "tools/rtrvr-integration",
           "tools/browser-linux-troubleshooting",
           "tools/slash-commands",
           "tools/thinking",
