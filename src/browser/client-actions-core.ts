@@ -23,6 +23,20 @@ export type BrowserFormField = {
 
 export type BrowserActRequest =
   | {
+      kind: "ai";
+      userInput: string;
+      urls?: string[];
+      schema?: Record<string, unknown>;
+      maxSteps?: number;
+      context?: string;
+      tool?: string;
+      maxPages?: number;
+      followLinks?: boolean;
+      linkPattern?: string;
+      outputDestination?: Record<string, unknown>;
+      targetId?: string;
+    }
+  | {
       kind: "click";
       ref: string;
       targetId?: string;

@@ -35,6 +35,15 @@ export function registerBrowserAgentSnapshotRoutes(
     const targetId = toStringOrEmpty(body.targetId) || undefined;
     if (!url) return jsonError(res, 400, "url is required");
     try {
+      const isRtrvr =
+        profileCtx.profile.driver === "rtrvr" || profileCtx.profile.driver === "rtrvr-cloud";
+      if (isRtrvr) {
+        const provider = profileCtx.getRtrvrProvider?.();
+        if (!provider) return jsonError(res, 500, "rtrvr.ai provider unavailable");
+        const tab = await profileCtx.ensureTabAvailable(targetId);
+        const result = await provider.navigate(url, tab.targetId);
+        return res.json({ targetId: tab.targetId, ...result });
+      }
       const tab = await profileCtx.ensureTabAvailable(targetId);
       const pw = await requirePwAi(res, "navigate");
       if (!pw) return;
@@ -55,6 +64,9 @@ export function registerBrowserAgentSnapshotRoutes(
     const body = readBody(req);
     const targetId = toStringOrEmpty(body.targetId) || undefined;
     try {
+      if (profileCtx.profile.driver === "rtrvr" || profileCtx.profile.driver === "rtrvr-cloud") {
+        return jsonError(res, 501, "PDF export is not supported for rtrvr.ai profiles");
+      }
       const tab = await profileCtx.ensureTabAvailable(targetId);
       const pw = await requirePwAi(res, "pdf");
       if (!pw) return;
@@ -95,6 +107,16 @@ export function registerBrowserAgentSnapshotRoutes(
     }
 
     try {
+      if (profileCtx.profile.driver === "rtrvr" || profileCtx.profile.driver === "rtrvr-cloud") {
+        const provider = profileCtx.getRtrvrProvider?.();
+        if (!provider) return jsonError(res, 500, "rtrvr.ai provider unavailable");
+        const result = await provider.screenshot({
+          targetId,
+          fullPage,
+          type,
+        });
+        return jsonError(res, 501, result.error);
+      }
       const tab = await profileCtx.ensureTabAvailable(targetId);
       let buffer: Buffer;
       const shouldUsePlaywright =
@@ -150,7 +172,10 @@ export function registerBrowserAgentSnapshotRoutes(
     const labels = toBoolean(req.query.labels) ?? undefined;
     const explicitFormat =
       req.query.format === "aria" ? "aria" : req.query.format === "ai" ? "ai" : undefined;
-    const format = explicitFormat ?? (mode ? "ai" : (await getPwAiModule()) ? "ai" : "aria");
+    const isRtrvr =
+      profileCtx.profile.driver === "rtrvr" || profileCtx.profile.driver === "rtrvr-cloud";
+    const format =
+      explicitFormat ?? (isRtrvr ? "ai" : mode ? "ai" : (await getPwAiModule()) ? "ai" : "aria");
     const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
     const hasMaxChars = Object.hasOwn(req.query, "maxChars");
     const maxCharsRaw =
@@ -184,6 +209,27 @@ export function registerBrowserAgentSnapshotRoutes(
       const tab = await profileCtx.ensureTabAvailable(targetId || undefined);
       if ((labels || mode === "efficient") && format === "aria") {
         return jsonError(res, 400, "labels/mode=efficient require format=ai");
+      }
+      if (isRtrvr) {
+        if (labels) {
+          return jsonError(res, 501, "Snapshot labels are not supported for rtrvr.ai profiles");
+        }
+        if (selector.trim() || frameSelector.trim()) {
+          return jsonError(
+            res,
+            400,
+            "selector/frame snapshots are not supported for rtrvr.ai profiles",
+          );
+        }
+        const provider = profileCtx.getRtrvrProvider?.();
+        if (!provider) return jsonError(res, 500, "rtrvr.ai provider unavailable");
+        const snap = await provider.snapshot({
+          format,
+          targetId: tab.targetId,
+          maxChars: resolvedMaxChars,
+          limit,
+        });
+        return res.json(snap);
       }
       if (format === "ai") {
         const pw = await requirePwAi(res, "ai snapshot");

@@ -38,7 +38,7 @@ export function registerBrowserManageCommands(
             query: parent?.browserProfile ? { profile: parent.browserProfile } : undefined,
           },
           {
-            timeoutMs: 1500,
+            timeoutMs: 5000,
           },
         );
         if (parent?.json) {
@@ -87,7 +87,7 @@ export function registerBrowserManageCommands(
             path: "/",
             query: profile ? { profile } : undefined,
           },
-          { timeoutMs: 1500 },
+          { timeoutMs: 5000 },
         );
         if (parent?.json) {
           defaultRuntime.log(JSON.stringify(status, null, 2));
@@ -121,7 +121,7 @@ export function registerBrowserManageCommands(
             path: "/",
             query: profile ? { profile } : undefined,
           },
-          { timeoutMs: 1500 },
+          { timeoutMs: 5000 },
         );
         if (parent?.json) {
           defaultRuntime.log(JSON.stringify(status, null, 2));

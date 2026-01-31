@@ -93,25 +93,39 @@ function createRtrvrProfileContext(
   opts: ContextOptions,
   profile: ResolvedBrowserProfile,
 ): ProfileContext {
-  let provider: RtrvrProvider | null = null;
+  const getProfileState = () => {
+    const current = opts.getState();
+    if (!current) throw new Error("Browser server not started");
+    let profileState = current.profiles.get(profile.name);
+    if (!profileState) {
+      profileState = { profile, running: null, lastTargetId: null };
+      current.profiles.set(profile.name, profileState);
+    } else {
+      profileState.profile = profile;
+    }
+    return profileState;
+  };
 
   const getProvider = () => {
-    if (!provider) {
-      provider = createRtrvrProvider({
+    const profileState = getProfileState();
+    if (!profileState.rtrvrProvider) {
+      profileState.rtrvrProvider = createRtrvrProvider({
         profileName: profile.name,
         profile: {
           driver: profile.driver as "rtrvr" | "rtrvr-cloud",
           color: profile.color,
           rtrvrApiKey: profile.rtrvrApiKey,
           rtrvrDeviceId: profile.rtrvrDeviceId,
+          rtrvrApiUrl: profile.rtrvrApiUrl,
         },
       });
     }
-    return provider;
+    return profileState.rtrvrProvider;
   };
 
   return {
     profile,
+    getRtrvrProvider: () => getProvider(),
 
     ensureBrowserAvailable: async () => {
       await getProvider().start();
@@ -119,6 +133,7 @@ function createRtrvrProfileContext(
 
     ensureTabAvailable: async (targetId?: string) => {
       const tabs = await getProvider().getTabs();
+      const profileState = getProfileState();
 
       // For cloud mode, we need a URL first
       if (profile.driver === "rtrvr-cloud" && tabs.length === 0) {
@@ -144,12 +159,19 @@ function createRtrvrProfileContext(
       }
 
       // Find specific tab or return first available
-      if (targetId) {
-        const found = tabs.find((t) => t.targetId === targetId || t.targetId.startsWith(targetId));
-        if (found) return found;
+      const preferred = targetId || profileState.lastTargetId || "";
+      if (preferred) {
+        const found = tabs.find(
+          (t) => t.targetId === preferred || t.targetId.startsWith(preferred),
+        );
+        if (found) {
+          profileState.lastTargetId = found.targetId;
+          return found;
+        }
       }
-
-      return tabs[0]!;
+      const chosen = tabs[0]!;
+      profileState.lastTargetId = chosen.targetId;
+      return chosen;
     },
 
     isHttpReachable: async () => {
@@ -172,11 +194,23 @@ function createRtrvrProfileContext(
 
     listTabs: () => getProvider().getTabs(),
 
-    openTab: (url) => getProvider().openTab(url),
+    openTab: async (url) => {
+      const tab = await getProvider().openTab(url);
+      getProfileState().lastTargetId = tab.targetId;
+      return tab;
+    },
 
-    focusTab: (targetId) => getProvider().focusTab(targetId),
+    focusTab: async (targetId) => {
+      await getProvider().focusTab(targetId);
+      getProfileState().lastTargetId = targetId;
+    },
 
-    closeTab: (targetId) => getProvider().closeTab(targetId),
+    closeTab: async (targetId) => {
+      await getProvider().closeTab(targetId);
+      if (getProfileState().lastTargetId === targetId) {
+        getProfileState().lastTargetId = null;
+      }
+    },
 
     stopRunningBrowser: async () => {
       // rtrvr.ai browsers are managed externally
@@ -187,7 +221,9 @@ function createRtrvrProfileContext(
       // rtrvr.ai profiles don't have local state to reset
       return {
         moved: false,
-        from: profile.driver === "rtrvr" ? "https://mcp.rtrvr.ai" : "https://api.rtrvr.ai",
+        from:
+          profile.rtrvrApiUrl ??
+          (profile.driver === "rtrvr" ? "https://mcp.rtrvr.ai" : "https://api.rtrvr.ai"),
       };
     },
   };
@@ -695,12 +731,18 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
       if (isRtrvrProfile({ driver: profile.driver, color: profile.color })) {
         try {
           const ctx = createRtrvrProfileContext(opts, profile);
-          const reachable = await ctx.isHttpReachable();
-          running = reachable;
-          if (running && profile.driver === "rtrvr") {
-            // Only get tab count for extension mode
-            const tabs = await ctx.listTabs().catch(() => []);
-            tabCount = tabs.filter((t) => t.type === "page").length;
+          const provider = ctx.getRtrvrProvider?.();
+          if (provider) {
+            const status = await provider.getProfileStatus();
+            running = status.running;
+            tabCount = status.tabCount;
+          } else {
+            const reachable = await ctx.isHttpReachable();
+            running = reachable;
+            if (running && profile.driver === "rtrvr") {
+              const tabs = await ctx.listTabs().catch(() => []);
+              tabCount = tabs.filter((t) => t.type === "page").length;
+            }
           }
         } catch {
           // rtrvr.ai not reachable

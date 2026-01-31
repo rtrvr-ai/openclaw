@@ -3,10 +3,12 @@ import { Type } from "@sinclair/typebox";
 import { optionalStringEnum, stringEnum } from "../schema/typebox.js";
 
 const BROWSER_ACT_KINDS = [
+  "ai",
   "click",
   "type",
   "press",
   "hover",
+  "scrollIntoView",
   "drag",
   "select",
   "fill",
@@ -51,6 +53,17 @@ const BrowserActSchema = Type.Object({
   // Common fields
   targetId: Type.Optional(Type.String()),
   ref: Type.Optional(Type.String()),
+  // ai
+  userInput: Type.Optional(Type.String()),
+  urls: Type.Optional(Type.Array(Type.String())),
+  schema: Type.Optional(Type.Object({}, { additionalProperties: true })),
+  maxSteps: Type.Optional(Type.Number()),
+  context: Type.Optional(Type.String()),
+  tool: Type.Optional(Type.String()),
+  maxPages: Type.Optional(Type.Number()),
+  followLinks: Type.Optional(Type.Boolean()),
+  linkPattern: Type.Optional(Type.String()),
+  outputDestination: Type.Optional(Type.Object({}, { additionalProperties: true })),
   // click
   doubleClick: Type.Optional(Type.Boolean()),
   button: Type.Optional(Type.String()),

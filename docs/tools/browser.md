@@ -49,6 +49,14 @@ Gateway.
 
 Set `browser.defaultProfile: "openclaw"` if you want managed mode by default.
 
+## rtrvr.ai profiles (extension + cloud)
+
+OpenClaw also supports rtrvr.ai as a browser provider:
+- `driver: "rtrvr"` uses the rtrvr.ai Chrome extension to control your logged-in browser.
+- `driver: "rtrvr-cloud"` uses rtrvr.ai’s cloud browsers for AI-powered automation.
+
+rtrvr.ai profiles do **not** support screenshots; use `snapshot` (accessibility tree) or AI actions (`act` with `kind: "ai"`). Full setup: [/tools/rtrvr-integration](/tools/rtrvr-integration)
+
 ## Configuration
 
 Browser settings live in `~/.openclaw/openclaw.json`.
@@ -197,6 +205,7 @@ OpenClaw supports multiple named profiles (routing configs). Profiles can be:
 - **openclaw-managed**: a dedicated Chromium-based browser instance with its own user data directory + CDP port
 - **remote**: an explicit CDP URL (Chromium-based browser running elsewhere)
 - **extension relay**: your existing Chrome tab(s) via the local relay + Chrome extension
+- **rtrvr.ai**: extension or cloud-based automation via `driver: "rtrvr"` / `driver: "rtrvr-cloud"`
 
 Defaults:
 - The `openclaw` profile is auto-created if missing.

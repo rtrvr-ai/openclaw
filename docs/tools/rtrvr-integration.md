@@ -79,6 +79,7 @@ If using `driver: "rtrvr"`:
 | `driver` | Yes | `"rtrvr"` for extension mode, `"rtrvr-cloud"` for cloud mode |
 | `rtrvrApiKey` | Yes | Your rtrvr.ai API key |
 | `rtrvrDeviceId` | No | Specific device ID (for extension mode with multiple devices) |
+| `rtrvrApiUrl` | No | API base override (defaults to `https://mcp.rtrvr.ai` or `https://api.rtrvr.ai`) |
 | `color` | Yes | Profile accent color (hex) |
 
 ## Usage
@@ -107,8 +108,13 @@ In agent mode, specify the profile parameter:
 
 ```json
 {
-  "action": "snapshot",
-  "profile": "rtrvr-cloud"
+  "action": "act",
+  "profile": "rtrvr",
+  "request": {
+    "kind": "ai",
+    "userInput": "Find the pricing page and list the starter plan details",
+    "urls": ["https://example.com"]
+  }
 }
 ```
 
@@ -117,6 +123,13 @@ In agent mode, specify the profile parameter:
 ### Extension Mode (`rtrvr`)
 
 All actions are routed through the rtrvr.ai Chrome extension on your local machine.
+
+**OpenClaw mapping:**
+- `open` / `navigate` → `open_new_tab` / `goto_url`
+- `snapshot` → `get_page_data` (accessibility tree)
+- `act` with `kind: "ai"` → `planner` by default (override with `tool`)
+- `act` with granular kinds (`click`, `type`, `hover`, `scrollIntoView`, `press`, `drag`, `select`, `fill`, `wait`, `close`) → `take_page_action`
+- `act` with `evaluate` → `execute_javascript`
 
 **Free Tools (no credits):**
 
@@ -140,16 +153,14 @@ All actions are routed through the rtrvr.ai Chrome extension on your local machi
 
 All actions are executed on rtrvr.ai's cloud browser infrastructure via the Agent API.
 
-| Action | Description |
-|--------|-------------|
-| `open` | Navigate to URL in cloud browser (uses /scrape) |
-| `snapshot` | Get accessibility tree via /scrape |
-| `act` | Execute AI-powered browser automation via /agent |
-| `extract` | Extract structured data via /agent |
+**OpenClaw mapping:**
+- `open` / `snapshot` → `/scrape` (accessibility tree)
+- `act` with `kind: "ai"` → `/agent` (planner/act/extract/crawl)
+- Granular `act` kinds (`click`, `type`, etc.) are not supported in cloud mode
 
 ## System Tools
 
-The following granular system tools are available for `take_page_action` in both extension and cloud modes:
+The following granular system tools are available for `take_page_action` in extension mode. OpenClaw uses them when you call `act` with granular kinds like `click`, `type`, `hover`, `scrollIntoView`, `press`, `drag`, `select`, `fill`, `wait`, and `close`. Cloud mode relies on `/agent` instead of direct tool calls.
 
 ### Core Interaction & Form Actions
 - `click_element` - Click on an element
@@ -211,7 +222,7 @@ The following granular system tools are available for `take_page_action` in both
 
 ### AI-Powered Actions
 
-rtrvr.ai supports natural language instructions for complex browser automation:
+rtrvr.ai supports natural language instructions for complex browser automation. OpenClaw defaults to `planner` when `userInput` and `urls` are provided. Override with `tool` (`planner`, `act`, `extract`, `crawl`).
 
 ```json
 {
@@ -219,7 +230,8 @@ rtrvr.ai supports natural language instructions for complex browser automation:
   "profile": "rtrvr",
   "request": {
     "kind": "ai",
-    "userInput": "Fill out the contact form with test data and submit"
+    "userInput": "Fill out the contact form with test data and submit",
+    "urls": ["https://example.com/contact"]
   }
 }
 ```
@@ -230,10 +242,13 @@ Extract data with a defined schema:
 
 ```json
 {
-  "action": "extract",
+  "action": "act",
   "profile": "rtrvr",
   "request": {
+    "kind": "ai",
+    "tool": "extract",
     "userInput": "Extract all product names and prices",
+    "urls": ["https://example.com/products"],
     "schema": {
       "fields": [
         { "name": "productName", "type": "string" },
@@ -293,6 +308,7 @@ openclaw browser status --browser-profile rtrvr
 - **Cloud mode:** Use `/scrape` API for accessibility tree
 
 For visual tasks, use AI-powered tools (`planner`, `act`) which understand page context through the accessibility tree.
+OpenClaw will return an error if you call `screenshot` on an rtrvr profile.
 
 ## Troubleshooting
 
@@ -337,9 +353,9 @@ If targeting a specific device:
 
 | Driver | Endpoint | Purpose |
 |--------|----------|---------|
-| `rtrvr` | `https://mcp.rtrvr.ai` | MCP API for extension control |
-| `rtrvr-cloud` | `https://api.rtrvr.ai/agent` | Agent API for AI tasks |
-| `rtrvr-cloud` | `https://api.rtrvr.ai/scrape` | Scrape API for page data |
+| `rtrvr` | `https://mcp.rtrvr.ai` | MCP API for extension control (override via `rtrvrApiUrl`) |
+| `rtrvr-cloud` | `https://api.rtrvr.ai/agent` | Agent API for AI tasks (override via `rtrvrApiUrl`) |
+| `rtrvr-cloud` | `https://api.rtrvr.ai/scrape` | Scrape API for page data (override via `rtrvrApiUrl`) |
 
 ## See Also
 

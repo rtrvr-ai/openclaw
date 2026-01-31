@@ -1,6 +1,7 @@
 import type { Server } from "node:http";
 
 import type { RunningChrome } from "./chrome.js";
+import type { RtrvrProvider } from "./rtrvr-provider.js";
 import type { BrowserTab } from "./client.js";
 import type { ResolvedBrowserConfig, ResolvedBrowserProfile } from "./config.js";
 
@@ -14,6 +15,8 @@ export type ProfileRuntimeState = {
   running: RunningChrome | null;
   /** Sticky tab selection when callers omit targetId (keeps snapshot+act consistent). */
   lastTargetId?: string | null;
+  /** Cached rtrvr provider (rtrvr/rtrvr-cloud drivers). */
+  rtrvrProvider?: RtrvrProvider;
 };
 
 export type BrowserServerState = {
@@ -57,6 +60,8 @@ export type ProfileContext = {
   closeTab: (targetId: string) => Promise<void>;
   stopRunningBrowser: () => Promise<{ stopped: boolean }>;
   resetProfile: () => Promise<{ moved: boolean; from: string; to?: string }>;
+  /** rtrvr provider accessor (only for rtrvr drivers). */
+  getRtrvrProvider?: () => RtrvrProvider;
 };
 
 export type ProfileStatus = {

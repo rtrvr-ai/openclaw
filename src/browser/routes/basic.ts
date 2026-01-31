@@ -30,6 +30,19 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
       return jsonError(res, profileCtx.status, profileCtx.error);
     }
 
+    if (profileCtx.profile.driver === "rtrvr" || profileCtx.profile.driver === "rtrvr-cloud") {
+      const provider = profileCtx.getRtrvrProvider?.();
+      if (!provider) {
+        return jsonError(res, 500, "rtrvr.ai provider unavailable");
+      }
+      const status = await provider.getStatus();
+      return res.json({
+        ...status,
+        enabled: current.resolved.enabled,
+        profile: profileCtx.profile.name,
+      });
+    }
+
     const [cdpHttp, cdpReady] = await Promise.all([
       profileCtx.isHttpReachable(300),
       profileCtx.isReachable(600),

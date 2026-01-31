@@ -13,6 +13,7 @@ Manage OpenClaw’s browser control server and run browser actions (tabs, snapsh
 Related:
 - Browser tool + API: [Browser tool](/tools/browser)
 - Chrome extension relay: [Chrome extension](/tools/chrome-extension)
+- rtrvr.ai profiles: [rtrvr.ai integration](/tools/rtrvr-integration)
 
 ## Common flags
 
@@ -36,6 +37,7 @@ openclaw browser --browser-profile openclaw snapshot
 Profiles are named browser routing configs. In practice:
 - `openclaw`: launches/attaches to a dedicated OpenClaw-managed Chrome instance (isolated user data dir).
 - `chrome`: controls your existing Chrome tab(s) via the Chrome extension relay.
+- `rtrvr` / `rtrvr-cloud`: rtrvr.ai extension + cloud profiles (AI actions, no screenshots).
 
 ```bash
 openclaw browser profiles
@@ -71,6 +73,8 @@ Screenshot:
 ```bash
 openclaw browser screenshot
 ```
+
+Note: rtrvr.ai profiles do not support screenshots. Use `snapshot` instead.
 
 Navigate/click/type (ref-based UI automation):
 

@@ -17,6 +17,33 @@ const RTRVR_CLOUD_API_URL = "https://api.rtrvr.ai";
 /** Default timeout for API requests (5 minutes) */
 const DEFAULT_TIMEOUT_MS = 300_000;
 
+function normalizeBaseUrl(raw: string | undefined, fallback: string): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return fallback;
+  return trimmed.replace(/\/$/, "");
+}
+
+function resolveCloudEndpoint(baseUrl: string, suffix: "/agent" | "/scrape"): string {
+  const trimmed = baseUrl.replace(/\/$/, "");
+  try {
+    const parsed = new URL(trimmed);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const last = parts.at(-1);
+    if (last === "agent" || last === "scrape") {
+      parts.pop();
+      parsed.pathname = parts.length ? `/${parts.join("/")}` : "";
+      return `${parsed.toString().replace(/\/$/, "")}${suffix}`;
+    }
+  } catch {
+    // fall through to string handling
+  }
+  if (trimmed.endsWith("/agent") || trimmed.endsWith("/scrape")) {
+    const base = trimmed.replace(/\/(agent|scrape)$/, "");
+    return `${base}${suffix}`;
+  }
+  return `${trimmed}${suffix}`;
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -25,6 +52,8 @@ export type RtrvrClientConfig = {
   apiKey: string;
   deviceId?: string;
   timeoutMs?: number;
+  mcpApiUrl?: string;
+  cloudApiUrl?: string;
 };
 
 export type RtrvrTab = {
@@ -234,14 +263,34 @@ export type RtrvrAgentResponse = {
 export type RtrvrScrapeResponse = {
   success: boolean;
   status?: string;
+  trajectoryId?: string;
+  tabs?: Array<{
+    tabId: number;
+    url: string;
+    title: string;
+    status?: "success" | "error";
+    error?: string;
+    tree?: string;
+    content?: string;
+    text?: string;
+  }>;
   url?: string;
   title?: string;
   text?: string;
   tree?: string;
   content?: string;
+  usageData?: {
+    totalCredits?: number;
+    totalUsd?: number;
+  };
   usage?: {
     creditsUsed: number;
     creditsLeft?: number;
+  };
+  metadata?: {
+    durationMs?: number;
+    outputTooLarge?: boolean;
+    responseRef?: unknown;
   };
   error?: string;
 };
@@ -265,6 +314,9 @@ export class RtrvrClient {
   private apiKey: string;
   private deviceId?: string;
   private timeoutMs: number;
+  private mcpApiUrl: string;
+  private cloudAgentUrl: string;
+  private cloudScrapeUrl: string;
 
   constructor(config: RtrvrClientConfig) {
     if (!config.apiKey) {
@@ -273,6 +325,10 @@ export class RtrvrClient {
     this.apiKey = config.apiKey;
     this.deviceId = config.deviceId;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.mcpApiUrl = normalizeBaseUrl(config.mcpApiUrl, RTRVR_MCP_API_URL);
+    const cloudBase = normalizeBaseUrl(config.cloudApiUrl, RTRVR_CLOUD_API_URL);
+    this.cloudAgentUrl = resolveCloudEndpoint(cloudBase, "/agent");
+    this.cloudScrapeUrl = resolveCloudEndpoint(cloudBase, "/scrape");
   }
 
   // ==========================================================================
@@ -336,7 +392,7 @@ export class RtrvrClient {
       body.deviceId = this.deviceId;
     }
 
-    const response = await this.request<RtrvrMcpResponse<T>>(RTRVR_MCP_API_URL, body, opts);
+    const response = await this.request<RtrvrMcpResponse<T>>(this.mcpApiUrl, body, opts);
 
     if (!response.success && response.error) {
       const errorMsg =
@@ -369,7 +425,7 @@ export class RtrvrClient {
       response: { verbosity: "final" },
     };
 
-    return this.request<RtrvrAgentResponse>(`${RTRVR_CLOUD_API_URL}/agent`, body, {
+    return this.request<RtrvrAgentResponse>(this.cloudAgentUrl, body, {
       timeoutMs: opts.timeoutMs ?? this.timeoutMs,
     });
   }
@@ -379,10 +435,10 @@ export class RtrvrClient {
    * Returns accessibility tree and text content (NOT screenshots).
    */
   private async scrapeRequest(
-    url: string,
+    urls: string[],
     opts?: { timeoutMs?: number },
   ): Promise<RtrvrScrapeResponse> {
-    return this.request<RtrvrScrapeResponse>(`${RTRVR_CLOUD_API_URL}/scrape`, { url }, opts);
+    return this.request<RtrvrScrapeResponse>(this.cloudScrapeUrl, { urls }, opts);
   }
 
   // ==========================================================================
@@ -626,8 +682,16 @@ export class RtrvrClient {
    * Returns accessibility tree and text content (NOT screenshots).
    * @note Does NOT require the rtrvr.ai extension
    */
-  async cloudScrape(opts: { url: string; timeoutMs?: number }): Promise<RtrvrScrapeResponse> {
-    return this.scrapeRequest(opts.url, { timeoutMs: opts.timeoutMs });
+  async cloudScrape(opts: {
+    url?: string;
+    urls?: string[];
+    timeoutMs?: number;
+  }): Promise<RtrvrScrapeResponse> {
+    const urls = Array.isArray(opts.urls) ? opts.urls : opts.url ? [opts.url] : [];
+    if (urls.length === 0) {
+      throw new Error("rtrvr.ai scrape requires at least one URL");
+    }
+    return this.scrapeRequest(urls, { timeoutMs: opts.timeoutMs });
   }
 
   // ==========================================================================

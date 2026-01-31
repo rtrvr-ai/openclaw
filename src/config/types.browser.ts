@@ -11,7 +11,7 @@ export type BrowserProfileConfig = {
   rtrvrApiKey?: string;
   /** rtrvr device ID (optional for rtrvr driver, identifies which extension to use). */
   rtrvrDeviceId?: string;
-  /** rtrvr API base URL (optional, defaults to https://us-central1-rtrvraibot.cloudfunctions.net). */
+  /** rtrvr API base URL override (optional; defaults to https://mcp.rtrvr.ai or https://api.rtrvr.ai). */
   rtrvrApiUrl?: string;
 };
 export type BrowserSnapshotDefaults = {
